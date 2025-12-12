@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pdb
+*.egg-info/
+*.egg
+*.log
+.env
+venv/
+.envrc
+
+# FastAPI/Uvicorn
+*.db
+*.sqlite3
+
+# Terraform
+*.tfstate
+*.tfstate.*
+crash.log
+override.tf
+override.tf.json
+.terraform/
+.terraform.lock.hcl
+
+# Helm/Kubernetes
+charts/*/charts/
+charts/*/tmp/
+charts/*/values-*.yaml
+*.tgz
+
+# Docker
+*.dockerfile~
+.dockerignore
+docker-compose.override.yml
+
+# CI/CD
+coverage/
+reports/
+*.xml
+*.json
+*.html
+
+# Node/npm (if used for Grafana provisioning scripts)
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# OS files
+.DS_Store
+Thumbs.db
