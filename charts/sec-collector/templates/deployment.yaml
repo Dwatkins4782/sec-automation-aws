@@ -1,0 +1,26 @@
+# charts/sec-collector/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: sec-collector, namespace: sec-data, labels: { app: sec-collector } }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: sec-collector } }
+  template:
+    metadata: { labels: { app: sec-collector } }
+    spec:
+      serviceAccountName: collector-sa
+      containers:
+        - name: app
+          image: ghcr.io/you/sec-collector:{{ .Values.image.tag }}
+          env:
+            - name: SQS_URL
+              valueFrom:
+                secretKeyRef: { name: collector-sqs, key: queue_url }
+          resources: { requests: { cpu: "200m", memory: "256Mi" }, limits: { cpu: "500m", memory: "512Mi" } }
+          ports: [{ name: metrics, containerPort: 8000 }]
+          readinessProbe: { httpGet: { path: /metrics, port: 8000 }, initialDelaySeconds: 5, periodSeconds: 10 }
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: collector-sa, namespace: sec-data, annotations: { eks.amazonaws.com/role-arn: arn:aws:iam::<acct>:role/sec-collector-irsa } }
+

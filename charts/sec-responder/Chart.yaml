@@ -1,0 +1,6 @@
+apiVersion: v2
+name: sec-responder
+description: Security automated response playbooks
+type: application
+version: 0.1.0
+appVersion: "1.0"

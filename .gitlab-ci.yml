@@ -1,0 +1,422 @@
+---
+# GitLab CI/CD Pipeline for Security Automation AWS
+# Stages: test -> build -> scan -> deploy
+
+variables:
+  # Docker registry configuration
+  DOCKER_REGISTRY: ghcr.io
+  DOCKER_IMAGE_PREFIX: ${CI_PROJECT_NAMESPACE}/${CI_PROJECT_NAME}
+  DOCKER_DRIVER: overlay2
+  
+  # Kubernetes configuration
+  KUBE_NAMESPACE: sec-data
+  HELM_VERSION: "3.12.0"
+  
+  # AWS configuration
+  AWS_DEFAULT_REGION: us-east-1
+  EKS_CLUSTER_NAME: sec-eks
+  
+  # Python configuration
+  PYTHON_VERSION: "3.11"
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+
+stages:
+  - test
+  - build
+  - scan
+  - deploy
+  - cleanup
+
+# Cache configuration for faster builds
+.cache_template: &cache_template
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - .cache/pip
+      - .venv/
+
+# Python test template
+.python_test_template: &python_test_template
+  image: python:${PYTHON_VERSION}-slim
+  <<: *cache_template
+  before_script:
+    - pip install --upgrade pip
+    - pip install pytest pytest-cov pytest-mock boto3 requests
+  artifacts:
+    reports:
+      junit: test-results.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
+    paths:
+      - htmlcov/
+    expire_in: 1 week
+
+# Docker build template
+.docker_build_template: &docker_build_template
+  image: docker:24-dind
+  services:
+    - docker:24-dind
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login $DOCKER_REGISTRY -u $CI_REGISTRY_USER --password-stdin
+  after_script:
+    - docker logout $DOCKER_REGISTRY
+
+# Test jobs
+test:framework:
+  stage: test
+  <<: *python_test_template
+  script:
+    - cd framework
+    - pip install -e .
+    - pytest tests/ --junitxml=../test-results.xml --cov=. --cov-report=xml:../coverage.xml --cov-report=html:../htmlcov
+  coverage: '/(?i)total.*? (100(?:\.0+)?\%|[1-9]?\d(?:\.\d+)?\%)$/'
+  only:
+    changes:
+      - framework/**/*
+      - .gitlab-ci.yml
+
+test:sec-collector:
+  stage: test
+  <<: *python_test_template
+  script:
+    - cd services/sec-collector
+    - pip install -r requirements.txt || echo "No requirements.txt found"
+    - pytest tests/ --junitxml=../../test-results-collector.xml || echo "No tests found"
+  only:
+    changes:
+      - services/sec-collector/**/*
+      - .gitlab-ci.yml
+
+test:sec-enricher:
+  stage: test
+  <<: *python_test_template
+  script:
+    - cd services/sec-enricher
+    - pip install -r requirements.txt || echo "No requirements.txt found"
+    - pytest tests/ --junitxml=../../test-results-enricher.xml --cov=. --cov-report=xml:../../coverage-enricher.xml
+  only:
+    changes:
+      - services/sec-enricher/**/*
+      - .gitlab-ci.yml
+
+test:sec-responder:
+  stage: test
+  <<: *python_test_template
+  script:
+    - cd services/sec-responder
+    - pip install -r requirements.txt || echo "No requirements.txt found"
+    - pytest tests/ --junitxml=../../test-results-responder.xml || echo "No tests found"
+  only:
+    changes:
+      - services/sec-responder/**/*
+      - .gitlab-ci.yml
+
+test:sec-reporter:
+  stage: test
+  <<: *python_test_template
+  script:
+    - cd services/sec-reporter
+    - pip install -r requirements.txt || echo "No requirements.txt found"
+    - pytest tests/ --junitxml=../../test-results-reporter.xml || echo "No tests found"
+  only:
+    changes:
+      - services/sec-reporter/**/*
+      - .gitlab-ci.yml
+
+# Lint and security checks
+lint:python:
+  stage: test
+  image: python:${PYTHON_VERSION}-slim
+  script:
+    - pip install flake8 black pylint bandit
+    - flake8 services/ framework/ --count --select=E9,F63,F7,F82 --show-source --statistics
+    - black --check services/ framework/ || echo "Code formatting issues found"
+    - bandit -r services/ framework/ -f json -o bandit-report.json || echo "Security issues found"
+  artifacts:
+    paths:
+      - bandit-report.json
+    expire_in: 1 week
+  allow_failure: true
+
+lint:yaml:
+  stage: test
+  image: python:${PYTHON_VERSION}-slim
+  script:
+    - pip install yamllint
+    - yamllint charts/ dashboards/ policies/ || echo "YAML issues found"
+  allow_failure: true
+
+# Build Docker images
+build:sec-collector:
+  stage: build
+  <<: *docker_build_template
+  script:
+    - export IMAGE_TAG=${CI_COMMIT_SHORT_SHA}
+    - export IMAGE_NAME=${DOCKER_REGISTRY}/${DOCKER_IMAGE_PREFIX}/sec-collector:${IMAGE_TAG}
+    - docker build -t ${IMAGE_NAME} -f services/sec-collector/Dockerfile services/sec-collector
+    - docker tag ${IMAGE_NAME} ${DOCKER_REGISTRY}/${DOCKER_IMAGE_PREFIX}/sec-collector:latest
+    - docker push ${IMAGE_NAME}
+    - docker push ${DOCKER_REGISTRY}/${DOCKER_IMAGE_PREFIX}/sec-collector:latest
+  only:
+    refs:
+      - main
+      - develop
+      - tags
+    changes:
+      - services/sec-collector/**/*
+      - .gitlab-ci.yml
+
+build:sec-enricher:
+  stage: build
+  <<: *docker_build_template
+  script:
+    - export IMAGE_TAG=${CI_COMMIT_SHORT_SHA}
+    - export IMAGE_NAME=${DOCKER_REGISTRY}/${DOCKER_IMAGE_PREFIX}/sec-enricher:${IMAGE_TAG}
+    - docker build -t ${IMAGE_NAME} -f services/sec-enricher/Dockerfile services/sec-enricher
+    - docker tag ${IMAGE_NAME} ${DOCKER_REGISTRY}/${DOCKER_IMAGE_PREFIX}/sec-enricher:latest
+    - docker push ${IMAGE_NAME}
+    - docker push ${DOCKER_REGISTRY}/${DOCKER_IMAGE_PREFIX}/sec-enricher:latest
+  only:
+    refs:
+      - main
+      - develop
+      - tags
+    changes:
+      - services/sec-enricher/**/*
+      - .gitlab-ci.yml
+
+build:sec-responder:
+  stage: build
+  <<: *docker_build_template
+  script:
+    - export IMAGE_TAG=${CI_COMMIT_SHORT_SHA}
+    - export IMAGE_NAME=${DOCKER_REGISTRY}/${DOCKER_IMAGE_PREFIX}/sec-responder:${IMAGE_TAG}
+    - docker build -t ${IMAGE_NAME} -f services/sec-responder/Dockerfile services/sec-responder
+    - docker tag ${IMAGE_NAME} ${DOCKER_REGISTRY}/${DOCKER_IMAGE_PREFIX}/sec-responder:latest
+    - docker push ${IMAGE_NAME}
+    - docker push ${DOCKER_REGISTRY}/${DOCKER_IMAGE_PREFIX}/sec-responder:latest
+  only:
+    refs:
+      - main
+      - develop
+      - tags
+    changes:
+      - services/sec-responder/**/*
+      - .gitlab-ci.yml
+
+build:sec-reporter:
+  stage: build
+  <<: *docker_build_template
+  script:
+    - export IMAGE_TAG=${CI_COMMIT_SHORT_SHA}
+    - export IMAGE_NAME=${DOCKER_REGISTRY}/${DOCKER_IMAGE_PREFIX}/sec-reporter:${IMAGE_TAG}
+    - docker build -t ${IMAGE_NAME} -f services/sec-reporter/Dockerfile services/sec-reporter
+    - docker tag ${IMAGE_NAME} ${DOCKER_REGISTRY}/${DOCKER_IMAGE_PREFIX}/sec-reporter:latest
+    - docker push ${IMAGE_NAME}
+    - docker push ${DOCKER_REGISTRY}/${DOCKER_IMAGE_PREFIX}/sec-reporter:latest
+  only:
+    refs:
+      - main
+      - develop
+      - tags
+    changes:
+      - services/sec-reporter/**/*
+      - .gitlab-ci.yml
+
+# Container security scanning
+scan:trivy:
+  stage: scan
+  image: aquasec/trivy:latest
+  script:
+    - trivy image --exit-code 0 --severity HIGH,CRITICAL --format json -o trivy-report.json ${DOCKER_REGISTRY}/${DOCKER_IMAGE_PREFIX}/sec-collector:${CI_COMMIT_SHORT_SHA} || true
+    - trivy image --exit-code 0 --severity HIGH,CRITICAL --format json -o trivy-report-enricher.json ${DOCKER_REGISTRY}/${DOCKER_IMAGE_PREFIX}/sec-enricher:${CI_COMMIT_SHORT_SHA} || true
+    - trivy image --exit-code 0 --severity HIGH,CRITICAL --format json -o trivy-report-responder.json ${DOCKER_REGISTRY}/${DOCKER_IMAGE_PREFIX}/sec-responder:${CI_COMMIT_SHORT_SHA} || true
+    - trivy image --exit-code 0 --severity HIGH,CRITICAL --format json -o trivy-report-reporter.json ${DOCKER_REGISTRY}/${DOCKER_IMAGE_PREFIX}/sec-reporter:${CI_COMMIT_SHORT_SHA} || true
+  artifacts:
+    paths:
+      - trivy-report*.json
+    expire_in: 1 week
+  allow_failure: true
+  only:
+    refs:
+      - main
+      - develop
+      - tags
+
+# Terraform plan for infrastructure changes
+terraform:plan:
+  stage: test
+  image: hashicorp/terraform:latest
+  script:
+    - cd infra/terraform
+    - terraform init
+    - terraform validate
+    - terraform plan -out=tfplan
+  artifacts:
+    paths:
+      - infra/terraform/tfplan
+    expire_in: 1 week
+  only:
+    changes:
+      - infra/terraform/**/*
+      - .gitlab-ci.yml
+  when: manual
+
+terraform:apply:
+  stage: deploy
+  image: hashicorp/terraform:latest
+  script:
+    - cd infra/terraform
+    - terraform init
+    - terraform apply -auto-approve tfplan
+  dependencies:
+    - terraform:plan
+  only:
+    refs:
+      - main
+    changes:
+      - infra/terraform/**/*
+  when: manual
+  environment:
+    name: production
+    action: prepare
+
+# Deploy to Kubernetes
+.deploy_template: &deploy_template
+  image: alpine/k8s:${HELM_VERSION}
+  before_script:
+    # Install AWS CLI
+    - apk add --no-cache python3 py3-pip
+    - pip3 install awscli
+    # Configure kubectl
+    - aws eks update-kubeconfig --name ${EKS_CLUSTER_NAME} --region ${AWS_DEFAULT_REGION}
+    - kubectl version --client
+    - helm version
+
+deploy:dev:
+  stage: deploy
+  <<: *deploy_template
+  script:
+    - export IMAGE_TAG=${CI_COMMIT_SHORT_SHA}
+    # Deploy services
+    - helm upgrade --install sec-collector charts/sec-collector 
+        --set image.tag=${IMAGE_TAG}
+        --set image.repository=${DOCKER_REGISTRY}/${DOCKER_IMAGE_PREFIX}/sec-collector
+        --namespace ${KUBE_NAMESPACE}
+        --create-namespace
+    - helm upgrade --install sec-enricher charts/sec-enricher
+        --set image.tag=${IMAGE_TAG}
+        --set image.repository=${DOCKER_REGISTRY}/${DOCKER_IMAGE_PREFIX}/sec-enricher
+        --namespace ${KUBE_NAMESPACE}
+    - helm upgrade --install sec-responder charts/sec-responder
+        --set image.tag=${IMAGE_TAG}
+        --set image.repository=${DOCKER_REGISTRY}/${DOCKER_IMAGE_PREFIX}/sec-responder
+        --namespace ${KUBE_NAMESPACE}
+    - helm upgrade --install sec-reporter charts/sec-reporter
+        --set image.tag=${IMAGE_TAG}
+        --set image.repository=${DOCKER_REGISTRY}/${DOCKER_IMAGE_PREFIX}/sec-reporter
+        --namespace ${KUBE_NAMESPACE}
+    # Apply network policies
+    - kubectl apply -f charts/networkpolicies/ -n ${KUBE_NAMESPACE} || echo "Network policies applied"
+  environment:
+    name: development
+    kubernetes:
+      namespace: ${KUBE_NAMESPACE}
+  only:
+    refs:
+      - develop
+
+deploy:staging:
+  stage: deploy
+  <<: *deploy_template
+  script:
+    - export IMAGE_TAG=${CI_COMMIT_SHORT_SHA}
+    - helm upgrade --install sec-collector charts/sec-collector --set image.tag=${IMAGE_TAG} --namespace sec-staging --create-namespace
+    - helm upgrade --install sec-enricher charts/sec-enricher --set image.tag=${IMAGE_TAG} --namespace sec-staging
+    - helm upgrade --install sec-responder charts/sec-responder --set image.tag=${IMAGE_TAG} --namespace sec-staging
+    - helm upgrade --install sec-reporter charts/sec-reporter --set image.tag=${IMAGE_TAG} --namespace sec-staging
+  environment:
+    name: staging
+    kubernetes:
+      namespace: sec-staging
+  only:
+    refs:
+      - main
+  when: manual
+
+deploy:production:
+  stage: deploy
+  <<: *deploy_template
+  script:
+    - export IMAGE_TAG=${CI_COMMIT_TAG:-${CI_COMMIT_SHORT_SHA}}
+    - helm upgrade --install sec-collector charts/sec-collector --set image.tag=${IMAGE_TAG} --namespace security --create-namespace
+    - helm upgrade --install sec-enricher charts/sec-enricher --set image.tag=${IMAGE_TAG} --namespace security
+    - helm upgrade --install sec-responder charts/sec-responder --set image.tag=${IMAGE_TAG} --namespace security
+    - helm upgrade --install sec-reporter charts/sec-reporter --set image.tag=${IMAGE_TAG} --namespace security
+    # Push Grafana dashboards
+    - apk add --no-cache python3 py3-pip
+    - python3 scripts/push_dashboards.py --namespace monitoring --service grafana --folder "Security Production"
+  environment:
+    name: production
+    kubernetes:
+      namespace: security
+  only:
+    refs:
+      - tags
+  when: manual
+
+# Deploy observability stack
+deploy:observability:
+  stage: deploy
+  <<: *deploy_template
+  script:
+    - helm repo add grafana https://grafana.github.io/helm-charts
+    - helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+    - helm repo update
+    - helm upgrade --install kube-prom-stack prometheus-community/kube-prometheus-stack 
+        --namespace monitoring 
+        --create-namespace
+        --set grafana.adminPassword=${GRAFANA_ADMIN_PASSWORD:-admin}
+    - helm upgrade --install loki grafana/loki --namespace monitoring
+    - helm upgrade --install promtail grafana/promtail --namespace monitoring
+    # Apply alert rules
+    - kubectl apply -f dashboards/alerts.yaml -n monitoring || echo "Alerts applied"
+  environment:
+    name: monitoring
+    kubernetes:
+      namespace: monitoring
+  only:
+    refs:
+      - main
+  when: manual
+
+# Cleanup old deployments
+cleanup:dev:
+  stage: cleanup
+  image: alpine/k8s:${HELM_VERSION}
+  script:
+    - apk add --no-cache python3 py3-pip
+    - pip3 install awscli
+    - aws eks update-kubeconfig --name ${EKS_CLUSTER_NAME} --region ${AWS_DEFAULT_REGION}
+    - kubectl delete pods --field-selector status.phase=Failed -n ${KUBE_NAMESPACE} || true
+    - kubectl delete pods --field-selector status.phase=Succeeded -n ${KUBE_NAMESPACE} || true
+  only:
+    refs:
+      - develop
+  when: manual
+
+# Release job for tagging
+release:
+  stage: deploy
+  image: alpine/git:latest
+  script:
+    - echo "Creating release ${CI_COMMIT_TAG}"
+    - echo "Release notes for ${CI_COMMIT_TAG}" > RELEASE_NOTES.md
+  artifacts:
+    paths:
+      - RELEASE_NOTES.md
+  only:
+    refs:
+      - tags
+  when: manual

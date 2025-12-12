@@ -1,0 +1,8 @@
+# policies/gatekeeper/constraint.yaml
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sAllowedRepos
+metadata: { name: only-signed-images }
+spec:
+  match: { kinds: [{ apiGroups: [""], kinds: ["Pod"] }] }
+  parameters:
+    repos: ["ghcr.io/you"]

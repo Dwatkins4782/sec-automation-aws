@@ -1,0 +1,14 @@
+---
+// dashboards/iam_posture.json
+{
+  "uid": "iam-posture",
+  "title": "IAM Security Posture",
+  "tags": ["security","iam"],
+  "panels": [
+    { "type": "stat", "title": "High-risk IAM actions (24h)",
+      "targets": [{ "expr": "sum(increase(iam_events_total{risk=\"high\"}[24h]))" }] },
+    { "type": "graph", "title": "Enrichment latency p95",
+      "targets": [{ "expr": "histogram_quantile(0.95, sum(rate(enrich_latency_ms_bucket[5m])) by (le))" }] }
+  ]
+}
+

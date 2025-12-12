@@ -1,0 +1,287 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-alerts
+  namespace: monitoring
+  labels:
+    app: prometheus
+data:
+  alerts.yaml: |
+    groups:
+      - name: security_services
+        interval: 30s
+        rules:
+          - alert: SecurityServiceDown
+            expr: up{job=~"sec-collector|sec-enricher|sec-responder|sec-reporter"} == 0
+            for: 5m
+            labels:
+              severity: critical
+              team: security
+            annotations:
+              summary: "Security service {{ $labels.job }} is down"
+              description: "Service {{ $labels.job }} on {{ $labels.instance }} has been down for more than 5 minutes."
+          
+          - alert: HighErrorRate
+            expr: rate(http_requests_total{status=~"5.."}[5m]) > 0.05
+            for: 10m
+            labels:
+              severity: warning
+              team: security
+            annotations:
+              summary: "High error rate on {{ $labels.job }}"
+              description: "Service {{ $labels.job }} is experiencing {{ $value | humanizePercentage }} error rate."
+          
+          - alert: HighLatency
+            expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 1
+            for: 10m
+            labels:
+              severity: warning
+              team: security
+            annotations:
+              summary: "High latency on {{ $labels.job }}"
+              description: "95th percentile latency is {{ $value | humanizeDuration }} on {{ $labels.job }}."
+          
+          - alert: PodCrashLooping
+            expr: rate(kube_pod_container_status_restarts_total{namespace=~"security|sec-data"}[15m]) > 0
+            for: 5m
+            labels:
+              severity: critical
+              team: security
+            annotations:
+              summary: "Pod {{ $labels.pod }} is crash looping"
+              description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} has restarted {{ $value }} times in the last 15 minutes."
+
+      - name: sqs_monitoring
+        interval: 30s
+        rules:
+          - alert: SQSQueueBacklog
+            expr: aws_sqs_approximate_number_of_messages > 1000
+            for: 15m
+            labels:
+              severity: warning
+              team: security
+            annotations:
+              summary: "SQS queue {{ $labels.queue_name }} has backlog"
+              description: "Queue {{ $labels.queue_name }} has {{ $value }} messages waiting. Check collector service."
+          
+          - alert: SQSHighAgeOfOldestMessage
+            expr: aws_sqs_approximate_age_of_oldest_message > 3600
+            for: 10m
+            labels:
+              severity: warning
+              team: security
+            annotations:
+              summary: "SQS messages aging in {{ $labels.queue_name }}"
+              description: "Oldest message in {{ $labels.queue_name }} is {{ $value | humanizeDuration }} old."
+          
+          - alert: SQSDLQMessages
+            expr: aws_sqs_approximate_number_of_messages{queue_name=~".*-dlq"} > 10
+            for: 5m
+            labels:
+              severity: critical
+              team: security
+            annotations:
+              summary: "Messages in DLQ {{ $labels.queue_name }}"
+              description: "Dead letter queue {{ $labels.queue_name }} has {{ $value }} failed messages."
+
+      - name: iam_security
+        interval: 60s
+        rules:
+          - alert: RootAccountUsage
+            expr: sum(aws_iam_root_account_usage_total) > 0
+            for: 1m
+            labels:
+              severity: critical
+              team: security
+              compliance: cis
+            annotations:
+              summary: "Root account usage detected"
+              description: "AWS root account has been used. This violates CIS benchmark 1.1."
+          
+          - alert: MFAComplianceLow
+            expr: (sum(aws_iam_users_without_mfa) / sum(aws_iam_users_total)) * 100 > 20
+            for: 30m
+            labels:
+              severity: warning
+              team: security
+              compliance: cis
+            annotations:
+              summary: "MFA compliance below threshold"
+              description: "{{ $value | humanizePercentage }} of IAM users do not have MFA enabled."
+          
+          - alert: StaleAccessKeys
+            expr: sum(aws_iam_access_keys_over_90_days) > 5
+            for: 1h
+            labels:
+              severity: warning
+              team: security
+              compliance: cis
+            annotations:
+              summary: "Stale IAM access keys detected"
+              description: "{{ $value }} access keys are older than 90 days and require rotation."
+          
+          - alert: UnusedIAMUsers
+            expr: sum(aws_iam_unused_users_90_days) > 10
+            for: 24h
+            labels:
+              severity: info
+              team: security
+              compliance: cleanup
+            annotations:
+              summary: "Inactive IAM users detected"
+              description: "{{ $value }} IAM users have been inactive for 90+ days. Consider removal."
+          
+          - alert: ExcessivePolicyViolations
+            expr: rate(aws_iam_policy_violations_total{severity="high"}[5m]) > 0.5
+            for: 10m
+            labels:
+              severity: warning
+              team: security
+            annotations:
+              summary: "High IAM policy violation rate"
+              description: "High severity IAM policy violations at {{ $value | humanize }}/s."
+
+      - name: cloudtrail_monitoring
+        interval: 30s
+        rules:
+          - alert: CloudTrailDisabled
+            expr: aws_cloudtrail_enabled == 0
+            for: 5m
+            labels:
+              severity: critical
+              team: security
+              compliance: cis
+            annotations:
+              summary: "CloudTrail has been disabled"
+              description: "CloudTrail {{ $labels.trail_name }} is not logging. This is a critical security violation."
+          
+          - alert: SuspiciousAPIActivity
+            expr: rate(aws_cloudtrail_events_total{event_name=~"DeleteTrail|StopLogging|DeleteBucket|PutBucketPolicy"}[5m]) > 0
+            for: 1m
+            labels:
+              severity: critical
+              team: security
+            annotations:
+              summary: "Suspicious AWS API activity detected"
+              description: "Potentially malicious API call {{ $labels.event_name }} detected from {{ $labels.source_ip }}."
+          
+          - alert: UnauthorizedAPIAttempts
+            expr: rate(aws_cloudtrail_events_total{error_code=~"AccessDenied|UnauthorizedOperation"}[5m]) > 1
+            for: 10m
+            labels:
+              severity: warning
+              team: security
+            annotations:
+              summary: "High rate of unauthorized API attempts"
+              description: "{{ $value | humanize }} unauthorized API attempts per second from {{ $labels.principal }}."
+          
+          - alert: ConsoleLoginWithoutMFA
+            expr: rate(aws_cloudtrail_console_login_without_mfa_total[5m]) > 0
+            for: 1m
+            labels:
+              severity: warning
+              team: security
+              compliance: cis
+            annotations:
+              summary: "Console login without MFA"
+              description: "User {{ $labels.user }} logged into console without MFA from {{ $labels.source_ip }}."
+
+      - name: resource_utilization
+        interval: 30s
+        rules:
+          - alert: HighMemoryUsage
+            expr: container_memory_usage_bytes{namespace=~"security|sec-data"} / container_spec_memory_limit_bytes > 0.9
+            for: 10m
+            labels:
+              severity: warning
+              team: security
+            annotations:
+              summary: "Container {{ $labels.pod }} high memory usage"
+              description: "Memory usage is {{ $value | humanizePercentage }} of limit in pod {{ $labels.pod }}."
+          
+          - alert: HighCPUUsage
+            expr: rate(container_cpu_usage_seconds_total{namespace=~"security|sec-data"}[5m]) > 0.8
+            for: 15m
+            labels:
+              severity: warning
+              team: security
+            annotations:
+              summary: "Container {{ $labels.pod }} high CPU usage"
+              description: "CPU usage is {{ $value | humanizePercentage }} in pod {{ $labels.pod }}."
+          
+          - alert: PersistentVolumeSpaceLow
+            expr: kubelet_volume_stats_available_bytes / kubelet_volume_stats_capacity_bytes < 0.1
+            for: 10m
+            labels:
+              severity: warning
+              team: security
+            annotations:
+              summary: "Low disk space on {{ $labels.persistentvolumeclaim }}"
+              description: "PVC {{ $labels.persistentvolumeclaim }} has less than 10% space remaining."
+
+      - name: enrichment_quality
+        interval: 60s
+        rules:
+          - alert: LowEnrichmentRate
+            expr: rate(sec_enricher_enriched_events_total[5m]) / rate(sec_enricher_received_events_total[5m]) < 0.7
+            for: 15m
+            labels:
+              severity: warning
+              team: security
+            annotations:
+              summary: "Low event enrichment rate"
+              description: "Only {{ $value | humanizePercentage }} of events are being enriched successfully."
+          
+          - alert: ThreatIntelLookupFailures
+            expr: rate(sec_enricher_threat_intel_failures_total[5m]) > 0.1
+            for: 10m
+            labels:
+              severity: warning
+              team: security
+            annotations:
+              summary: "High threat intel lookup failure rate"
+              description: "Threat intelligence lookups failing at {{ $value | humanize }}/s."
+          
+          - alert: GeoIPLookupFailures
+            expr: rate(sec_enricher_geoip_failures_total[5m]) > 0.2
+            for: 15m
+            labels:
+              severity: info
+              team: security
+            annotations:
+              summary: "GeoIP lookups experiencing failures"
+              description: "GeoIP enrichment failing at {{ $value | humanize }}/s."
+
+      - name: response_automation
+        interval: 60s
+        rules:
+          - alert: AutomatedResponseFailures
+            expr: rate(sec_responder_action_failures_total[5m]) > 0.05
+            for: 10m
+            labels:
+              severity: critical
+              team: security
+            annotations:
+              summary: "Automated response actions failing"
+              description: "Response actions failing at {{ $value | humanize }}/s for {{ $labels.playbook }}."
+          
+          - alert: HighSeverityIncidentsUnresolved
+            expr: sec_responder_unresolved_incidents{severity="high"} > 5
+            for: 30m
+            labels:
+              severity: warning
+              team: security
+            annotations:
+              summary: "Multiple high severity incidents unresolved"
+              description: "{{ $value }} high severity incidents have been unresolved for 30+ minutes."
+          
+          - alert: PlaybookExecutionTimeout
+            expr: rate(sec_responder_playbook_timeouts_total[5m]) > 0
+            for: 5m
+            labels:
+              severity: warning
+              team: security
+            annotations:
+              summary: "Response playbook timeouts"
+              description: "Playbook {{ $labels.playbook }} is timing out at {{ $value | humanize }}/s."

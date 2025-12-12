@@ -1,0 +1,6 @@
+apiVersion: v2
+name: sec-collector
+description: Security event collector from SQS
+type: application
+version: 0.1.0
+appVersion: "1.0"
